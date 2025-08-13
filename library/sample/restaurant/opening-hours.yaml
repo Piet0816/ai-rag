@@ -1,0 +1,12 @@
+timezone: Europe/Berlin
+hours:
+  monday:    { open: "11:30", close: "22:00", last_order: "21:30" }
+  tuesday:   { open: "11:30", close: "22:00", last_order: "21:30" }
+  wednesday: { open: "11:30", close: "22:00", last_order: "21:30" }
+  thursday:  { open: "11:30", close: "22:00", last_order: "21:30" }
+  friday:    { open: "11:30", close: "22:30", last_order: "22:00" }
+  saturday:  { open: "12:00", close: "23:00", last_order: "22:30" }
+  sunday:    { open: "12:00", close: "21:00", last_order: "20:30" }
+exceptions:
+  - date: "2025-12-24"
+    note: "Closed for holiday"

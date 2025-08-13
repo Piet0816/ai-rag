@@ -1,0 +1,29 @@
+<suppliers>
+  <supplier id="SUSHI01">
+    <name>Nori & Rice Co.</name>
+    <email>orders@nori-rice.example</email>
+    <items>
+      <item>sushi rice</item>
+      <item>nori sheets</item>
+      <item>soy sauce</item>
+    </items>
+  </supplier>
+  <supplier id="ITALY02">
+    <name>Pasta di Roma</name>
+    <email>sales@pastadiroma.example</email>
+    <items>
+      <item>spaghetti</item>
+      <item>pecorino romano</item>
+      <item>guanciale</item>
+    </items>
+  </supplier>
+  <supplier id="ASIA03">
+    <name>Bangkok Pantry</name>
+    <email>hello@bangkokpantry.example</email>
+    <items>
+      <item>tamarind paste</item>
+      <item>rice noodles</item>
+      <item>peanuts</item>
+    </items>
+  </supplier>
+</suppliers>

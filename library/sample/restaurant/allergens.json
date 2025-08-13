@@ -1,0 +1,12 @@
+{
+  "sushi": ["fish", "soy", "sesame"],
+  "pizza margherita": ["gluten", "dairy"],
+  "falafel": ["sesame", "gluten (pita)"],
+  "ramen": ["gluten", "soy", "egg"],
+  "spaghetti carbonara": ["gluten", "egg", "dairy", "pork"],
+  "veggie burger": ["gluten", "soy"],
+  "caesar salad": ["fish (anchovy)", "dairy", "egg", "gluten (croutons)"],
+  "butter chicken": ["dairy"],
+  "pad thai": ["peanut", "soy", "egg"],
+  "schnitzel": ["gluten", "egg"]
+}

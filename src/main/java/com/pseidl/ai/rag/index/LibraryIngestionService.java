@@ -1,162 +1,130 @@
 package com.pseidl.ai.rag.index;
 
+import static com.pseidl.ai.rag.index.InMemoryVectorIndex.chunkByChars;
+
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 import com.pseidl.ai.rag.config.AppConfig;
-import com.pseidl.ai.rag.index.InMemoryVectorIndex.Chunk;
-import com.pseidl.ai.rag.index.InMemoryVectorIndex.UpsertRecord;
-import com.pseidl.ai.rag.library.LibraryFileService;
 import com.pseidl.ai.rag.ollama.EmbeddingClient;
 import com.pseidl.ai.rag.persistence.IndexFileStore;
 
 /**
- * Ingests a single text-like file from the library:
- *  1) Read text
- *  2) Chunk by characters (with overlap)
- *  3) Create embeddings (logs progress)
- *  4) Upsert into the in-memory vector index (index logs progress + total time)
- *  5) Persist the new chunks to disk via IndexFileStore (append mode by default)
+ * Ingests a single library file:
+ *  - extract text (PDF/DOC/DOCX via Tika, plain files via UTF-8),
+ *  - chunk (character-based with overlap),
+ *  - embed,
+ *  - upsert to in-memory index and append to on-disk store.
  *
- * NOTE: For PDF/DOCX we will later add text extraction. For now use text/CSV/MD/etc.
+ * Returns timing breakdown that your controller expects.
  */
 @Service
 public class LibraryIngestionService {
 
     private static final Logger log = LoggerFactory.getLogger(LibraryIngestionService.class);
 
-    private final LibraryFileService files;
+    private final AppConfig app;
+    private final TextExtractionService extractor;
     private final EmbeddingClient embeddings;
     private final InMemoryVectorIndex index;
     private final IndexFileStore store;
 
-    /**
-     * Toggle automatic persistence after a successful ingest.
-     * Default true if not set: app.index.auto-save=true|false
-     */
-    @Value("${app.index.auto-save:true}")
-    private boolean autoSave;
-
-    public LibraryIngestionService(LibraryFileService files,
+    public LibraryIngestionService(AppConfig app,
+                                   TextExtractionService extractor,
                                    EmbeddingClient embeddings,
-                                   InMemoryVectorIndex index,                              
+                                   InMemoryVectorIndex index,
                                    IndexFileStore store) {
-        this.files = files;
+        this.app = app;
+        this.extractor = extractor;
         this.embeddings = embeddings;
         this.index = index;
         this.store = store;
     }
 
     /**
-     * Ingests one file (relative to the library root).
-     * Typical starting values: chunkSize=800, overlap=120, logEvery=50.
+     * Ingest a single file by its relative path inside the library folder.
      */
     public Result ingestTextFile(String relativePath, int chunkSize, int overlap, int logEvery) throws Exception {
-        long t0 = System.nanoTime();
-        String source = relativePath.replace('\\', '/');
+        final long t0 = System.nanoTime();
 
-        // 1) Read
-        String text = files.readFile(relativePath);
+        Path root = Paths.get(app.getLibraryDir()).toAbsolutePath().normalize();
+        Path abs = root.resolve(relativePath).normalize();
+
+        if (!abs.startsWith(root)) {
+            throw new IllegalArgumentException("Refusing to read outside library dir: " + relativePath);
+        }
+        if (!Files.exists(abs)) {
+            throw new IllegalArgumentException("File not found: " + relativePath);
+        }
+
+        final String source = root.relativize(abs).toString().replace('\\', '/');
+
+        // 1) Extract text
+        String text = extractor.extract(abs);
         if (text == null || text.isBlank()) {
-            index.removeSource(source);
-            // We intentionally do not compact the on-disk store here (append-only).
-            // Next step: implement "upsert-by-source" to rewrite the store without this source.
-            return new Result(source, 0, 0, 0, 0);
+            log.info("No textual content extracted from '{}'; skipping.", source);
+            return new Result(source, 0, secondsSince(t0), 0.0, 0.0);
         }
 
         // 2) Chunk
-        List<Chunk> chunks = InMemoryVectorIndex.chunkByChars(source, text, chunkSize, overlap);
-        log.info("Ingesting '{}' -> {} chunk(s) [chunkSize={}, overlap={}]", source, chunks.size(), chunkSize, overlap);
+        List<InMemoryVectorIndex.Chunk> chunks = chunkByChars(source, text, chunkSize, overlap);
         if (chunks.isEmpty()) {
-            index.removeSource(source);
-            long tEmpty = System.nanoTime();
-            return new Result(source, 0, secs(tEmpty - t0), 0, 0);
+            return new Result(source, 0, secondsSince(t0), 0.0, 0.0);
         }
 
-        // 3) Embed (with progress logging)
-        if (logEvery < 1) logEvery = 50;
-        long te0 = System.nanoTime();
-        List<UpsertRecord> batch = new ArrayList<>(chunks.size());
+        // 3) Embed
+        long tEmbed0 = System.nanoTime();
+        List<InMemoryVectorIndex.UpsertRecord> batch = new ArrayList<>(chunks.size());
         int i = 0;
-        for (Chunk c : chunks) {
-            float[] vec = embeddings.embed(c.text());
-            batch.add(new UpsertRecord(c.id(), c.source(), c.chunkIndex(), c.text(), vec));
-
+        int every = Math.max(1, logEvery);
+        for (var ch : chunks) {
+            float[] vec = embeddings.embed(ch.text());
+            String id = InMemoryVectorIndex.makeId(source, ch.chunkIndex());
+            batch.add(new InMemoryVectorIndex.UpsertRecord(id, source, ch.chunkIndex(), ch.text(), vec));
             i++;
-            if (i % logEvery == 0 || i == chunks.size()) {
-                long now = System.nanoTime();
-                double elapsed = secs(now - te0);
-                double rate = i / Math.max(elapsed, 1e-6);
-                double pct = 100.0 * i / chunks.size();
-                log.info("Embedding progress {}/{} ({}%), elapsed {}s, rate {} items/s",
-                        i, chunks.size(),
-                        String.format("%.1f", pct),
-                        String.format("%.2f", elapsed),
-                        String.format("%.1f", rate));
+            if (i % every == 0) {
+                double sec = secondsSince(tEmbed0);
+                log.info("Embedding '{}'… {}/{} chunks ({}s)", source, i, chunks.size(), fmt2(sec));
             }
         }
-        long te1 = System.nanoTime();
+        double embedSeconds = secondsSince(tEmbed0);
 
-        // 4) Replace old entries in-memory for this source, then upsert new ones
-        index.removeSource(source);
-        long tu0 = System.nanoTime();
-        index.upsertAll(batch, Math.max(1, logEvery));
-        long tu1 = System.nanoTime();
+        // 4) Upsert RAM + append to disk
+        long tUpsert0 = System.nanoTime();
+        index.upsertAll(batch, every);
+        store.appendBatch(batch);
+        double upsertSeconds = secondsSince(tUpsert0);
 
-        // 5) Persist to disk (append mode)
-        // NOTE: This will append even if the same source was ingested before.
-        // In the next step we can add a "compact/upsert-by-source" operation to avoid duplicates on disk.
-        if (autoSave) {
-            try {
-                long ts0 = System.nanoTime();
-                store.appendBatch(batch);
-                long ts1 = System.nanoTime();
-                log.info("Persisted {} record(s) for '{}' to {}", batch.size(), source, store.getStorePath());
-                log.info("Persistence time: {}s", String.format("%.2f", secs(ts1 - ts0)));
-            } catch (Exception e) {
-                log.warn("Failed to persist records for '{}': {}", source, e.toString());
-            }
-        } else {
-            log.info("Auto-save is disabled (app.index.auto-save=false); skipping persistence for '{}'", source);
-        }
+        double totalSeconds = secondsSince(t0);
+        log.info("Ingested '{}' (chunks={}) in {}s (embed={}s, upsert={}s)",
+                source, chunks.size(), fmt2(totalSeconds), fmt2(embedSeconds), fmt2(upsertSeconds));
 
-        long t1 = System.nanoTime();
-        Result r = new Result(
-                source,
-                chunks.size(),
-                secs(t1 - t0),
-                secs(te1 - te0),
-                secs(tu1 - tu0)
-        );
-        log.info("Ingestion complete for '{}': chunks={}, total={}s (embed={}s, upsert={}s)",
-                r.source(), r.chunks(), fmt(r.totalSeconds()), fmt(r.embedSeconds()), fmt(r.upsertSeconds()));
-        return r;
+        return new Result(source, chunks.size(), totalSeconds, embedSeconds, upsertSeconds);
     }
 
-    private static double secs(long nanos) {
-        return nanos / 1_000_000_000.0;
+    // ---------- util ----------
+
+    private static double secondsSince(long t0) {
+        return Duration.ofNanos(System.nanoTime() - t0).toNanos() / 1_000_000_000.0;
     }
 
-    private static String fmt(double v) {
-        return String.format("%.2f", v);
-    }
+    private static String fmt2(double v) { return String.format(Locale.ROOT, "%.2f", v); }
 
-    /** Minimal ingest result for metrics. */
+    // ---------- DTO your controller expects ----------
     public record Result(
             String source,
             int chunks,
             double totalSeconds,
             double embedSeconds,
             double upsertSeconds
-    ) {
-        public String source() { return source; }
-        public int chunks() { return chunks; }
-        public String totalPretty() { return Duration.ofMillis((long)(totalSeconds * 1000)).toString(); }
-    }
+    ) {}
 }
