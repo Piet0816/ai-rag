@@ -12,7 +12,6 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
-import java.util.stream.Collectors;
 
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.MediaType;
@@ -32,6 +31,9 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.pseidl.ai.rag.config.AppConfig;
 import com.pseidl.ai.rag.index.InMemoryVectorIndex;
 import com.pseidl.ai.rag.ollama.EmbeddingClient;
+import com.pseidl.ai.rag.retrieval.MultiQueryRetrievalService;
+import com.pseidl.ai.rag.retrieval.MultiQueryRetrievalService.RetrievalResult;
+import com.pseidl.ai.rag.retrieval.MultiQueryRetrievalService.RetrievedHit;
 
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.media.ArraySchema;
@@ -53,6 +55,7 @@ public class ChatController {
 	private final String chatModel;
 	private final String baseUrl;
 	private final ObjectMapper mapper = new ObjectMapper();
+	private final MultiQueryRetrievalService retrieval;
 
 	@Value("${app.retrieval.top-k:6}")
 	private int defaultTopK;
@@ -61,12 +64,13 @@ public class ChatController {
 	private int maxContextChars;
 
 	public ChatController(RestClient.Builder builder, AppConfig app, EmbeddingClient embeddings,
-			InMemoryVectorIndex index) {
+			InMemoryVectorIndex index, MultiQueryRetrievalService retrieval) {
 		this.http = builder.baseUrl(app.getOllama().getBaseUrl()).build();
 		this.baseUrl = app.getOllama().getBaseUrl();
 		this.chatModel = app.getOllama().getChatModel();
 		this.embeddings = embeddings;
 		this.index = index;
+		this.retrieval = retrieval;
 	}
 
 	// ===== NEW: think levels =====
@@ -303,12 +307,9 @@ public class ChatController {
 
 		int topK = (topKParam != null && topKParam > 0) ? topKParam : Math.max(1, defaultTopK);
 
-		float[] qvec = embeddings.embed(latestUser.content());
-		var hits = index.search(qvec, topK);
-
-		String context = buildContext(hits, maxContextChars);
-		List<RetrievedHit> retrieved = hits.stream().map(h -> new RetrievedHit(h.source(), h.chunkIndex(), h.score()))
-				.collect(Collectors.toList());
+		RetrievalResult rr = retrieval.retrieve(latestUser.content(), topK, maxContextChars);
+		String context = rr.context();
+		List<RetrievedHit> retrieved = rr.toRetrieved();
 
 		String system = """
 				You are a helpful assistant. Use the provided CONTEXT to answer the user's question.
@@ -331,28 +332,6 @@ public class ChatController {
 		emitter.send(SseEmitter.event().name(name).data(data));
 	}
 
-	private static String buildContext(List<InMemoryVectorIndex.Result> hits, int maxChars) {
-		if (hits == null || hits.isEmpty())
-			return "(no matches)";
-		StringBuilder sb = new StringBuilder(Math.min(maxChars, 8192));
-		for (var h : hits) {
-			String header = "\n[" + h.source() + "#" + h.chunkIndex() + "] (score " + String.format("%.3f", h.score())
-					+ ")\n";
-			if (sb.length() + header.length() > maxChars)
-				break;
-			sb.append(header);
-			String txt = h.text();
-			int remain = maxChars - sb.length();
-			if (txt.length() <= remain)
-				sb.append(txt);
-			else {
-				sb.append(txt, 0, Math.max(0, remain));
-				break;
-			}
-		}
-		return sb.toString();
-	}
-
 	// -------- DTOs --------
 	public record ChatMessage(@Schema(description = "Role: user|assistant|system", example = "user") String role,
 			@Schema(description = "Message content", example = "What does Alice like to eat?") String content) {
@@ -360,10 +339,6 @@ public class ChatController {
 
 	public record ChatRequest(
 			@ArraySchema(schema = @Schema(implementation = ChatMessage.class)) List<ChatMessage> messages) {
-	}
-
-	public record RetrievedHit(@Schema(description = "Source file") String source,
-			@Schema(description = "Chunk index") int chunkIndex, @Schema(description = "Cosine score") double score) {
 	}
 
 	public record ChatResponse(@Schema(description = "Model used") String model,
