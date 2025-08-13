@@ -2,35 +2,29 @@ package com.pseidl.ai.rag.index;
 
 import static java.util.Objects.requireNonNull;
 
+import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.Reader;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.List;
 import java.util.Locale;
+import java.util.StringJoiner;
 
-import org.apache.tika.exception.TikaException;
+import org.apache.commons.csv.CSVFormat;
+import org.apache.commons.csv.CSVParser;
+import org.apache.commons.csv.CSVRecord;
 import org.apache.tika.metadata.Metadata;
 import org.apache.tika.parser.AutoDetectParser;
 import org.apache.tika.parser.ParseContext;
 import org.apache.tika.sax.BodyContentHandler;
 import org.springframework.stereotype.Service;
 
-
-/**
- * Small utility to extract text from files.
- * - Uses Apache Tika for binary docs (pdf, doc, docx, …)
- * - Falls back to UTF-8 read for plain text formats (txt, md, csv, json, xml, yaml, properties, code files)
- *
- * Usage (next step): inject into LibraryIngestionService and call extract(filePath) to get text.
- */
 @Service
 public class TextExtractionService {
 
-    /**
-     * Extracts text content from the given file.
-     * @param file absolute path to the file
-     */
     public String extract(Path file) throws IOException {
         requireNonNull(file, "file");
         String ext = extension(file);
@@ -47,39 +41,101 @@ public class TextExtractionService {
             case "xlsx":
                 return extractWithTika(file);
 
+            case "csv":
+                return extractCsv(file);
+
             default:
-                // Plain text family: read as UTF-8
-                // (txt, md, csv, json, xml, yaml/yml, properties, code files, etc.)
                 String text = Files.readString(file, StandardCharsets.UTF_8);
                 return normalize(text);
         }
     }
 
-    // --- internals ---
+    // ---- CSV (header-aware) ----
+    private String extractCsv(Path file) throws IOException {
+        char delim = sniffDelimiter(file);
+        CSVFormat fmt = CSVFormat.DEFAULT.builder()
+                .setDelimiter(delim)
+                .setTrim(true)
+                .setIgnoreSurroundingSpaces(true)
+                .setQuote('"')
+                .setHeader()              // read header from first record
+                .setSkipHeaderRecord(true)
+                .build();
 
+        StringBuilder out = new StringBuilder(8192);
+        try (Reader r = Files.newBufferedReader(file, StandardCharsets.UTF_8);
+             CSVParser parser = new CSVParser(r, fmt)) {
+
+            List<String> headers = parser.getHeaderNames();
+            int row = 0;
+            for (CSVRecord rec : parser) {
+                row++;
+                StringJoiner sj = new StringJoiner(" | ");
+                for (String h : headers) {
+                    String v = rec.isMapped(h) ? rec.get(h) : "";
+                    sj.add(h + "=" + quoteIfNeeded(v));
+                }
+                out.append("row ").append(row).append(": ").append(sj).append("\n");
+            }
+        }
+        
+        String res = normalize(out.toString());
+        //System.err.println(res);
+        return res;
+    }
+
+    private static String quoteIfNeeded(String v) {
+        if (v == null) return "\"\"";
+        String s = v.trim();
+        // quote if contains whitespace or separators
+        if (s.isEmpty() || s.matches(".*[\\s\\|:].*")) {
+            return "\"" + s.replace("\"", "\\\"") + "\"";
+        }
+        return s;
+    }
+
+    private static char sniffDelimiter(Path file) throws IOException {
+        try (BufferedReader br = Files.newBufferedReader(file, StandardCharsets.UTF_8)) {
+            String first = br.readLine();
+            if (first == null) return ',';
+            int cComma = count(first, ',');
+            int cSemi  = count(first, ';');
+            int cTab   = count(first, '\t');
+            int cPipe  = count(first, '|');
+            int max = Math.max(Math.max(cComma, cSemi), Math.max(cTab, cPipe));
+            if (max == cSemi) return ';';
+            if (max == cTab)  return '\t';
+            if (max == cPipe) return '|';
+            return ','; // default
+        }
+    }
+
+    private static int count(String s, char ch) {
+        int n = 0;
+        for (int i = 0; i < s.length(); i++) if (s.charAt(i) == ch) n++;
+        return n;
+    }
+
+    // ---- Tika for binary docs ----
     private String extractWithTika(Path file) throws IOException {
         try (InputStream is = Files.newInputStream(file)) {
             AutoDetectParser parser = new AutoDetectParser();
-            // -1 => no character limit (let ingestion chunking handle size)
             BodyContentHandler handler = new BodyContentHandler(-1);
             Metadata metadata = new Metadata();
             ParseContext ctx = new ParseContext();
 
             parser.parse(is, handler, metadata, ctx);
-            String text = handler.toString();
-            return normalize(text);
+            return normalize(handler.toString());
         } catch (Exception e) {
             throw new IOException("Tika parse failed for " + file.getFileName() + ": " + e.getMessage(), e);
         }
     }
 
-    /** Light normalization for indexing: unify newlines, collapse runs of spaces, keep paragraph breaks. */
+    // ---- helpers ----
     private String normalize(String s) {
         if (s == null) return "";
         String t = s.replace("\r\n", "\n").replace('\r', '\n');
-        // collapse runs of spaces/tabs but keep newlines
         t = t.replaceAll("[ \\t\\u00A0\\f\\u000B]+", " ");
-        // squeeze huge blank gaps to max 2 newlines
         t = t.replaceAll("\\n{3,}", "\n\n");
         return t.trim();
     }

@@ -35,3 +35,7 @@ build/
 /library/index.jsonl.gz
 /library/index.jsonl.gz.compact.tmp
 /library/sample/pokemon/**
+/.gitattributes
+/.mvn/wrapper/maven-wrapper.properties
+/mvnw
+/mvnw.cmd

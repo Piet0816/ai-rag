@@ -10,6 +10,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.stream.Collectors;
 
@@ -68,16 +69,46 @@ public class ChatController {
 		this.index = index;
 	}
 
+	// ===== NEW: think levels =====
+	public enum ThinkMode {
+
+		FAST, // quick, concise
+		MEDIUM, // default balance
+		LONG, // more tokens, warmer
+		XLONG, // even longer
+		MAX; // as long as we reasonably allow
+
+		static ThinkMode parse(String s) {
+			if (s == null)
+				return MEDIUM;
+			String t = s.trim().toUpperCase(Locale.ROOT);
+			// a few friendly aliases
+			if ("SHORT".equals(t))
+				return FAST;
+			if ("VERY_LONG".equals(t) || "DEEP".equals(t))
+				return XLONG;
+			try {
+				return ThinkMode.valueOf(t);
+			} catch (Exception ignore) {
+				return MEDIUM;
+			}
+		}
+	}
+
 	// -------- non-streaming --------
 	@PostMapping(value = "", consumes = MediaType.APPLICATION_JSON_VALUE, produces = MediaType.APPLICATION_JSON_VALUE)
 	@Operation(summary = "Chat with retrieval", description = "Embeds the latest user message, retrieves top-K, builds context, and calls Ollama.")
 	public ResponseEntity<ChatResponse> chat(@RequestBody ChatRequest req,
 			@RequestParam(name = "topK", required = false) Integer topKParam,
+			@RequestParam(name = "think", defaultValue = "FAST") String thinkParam,
 			@RequestParam(name = "debug", defaultValue = "false") boolean debug) {
 		try {
 			Prepared p = prepare(req, topKParam);
 			if (p.error != null)
 				return ResponseEntity.badRequest().body(ChatResponse.error(p.error));
+
+			ThinkMode think = ThinkMode.parse(thinkParam);
+			Map<String, Object> opts = optionsFor(think);
 
 			String reply;
 			try {
@@ -85,6 +116,7 @@ public class ChatController {
 				body.put("model", chatModel);
 				body.put("messages", p.messages);
 				body.put("stream", false);
+				body.put("options", opts); // <-- NEW
 
 				JsonNode node = http.post().uri("/api/chat").contentType(MediaType.APPLICATION_JSON).body(body)
 						.retrieve().body(JsonNode.class);
@@ -98,8 +130,9 @@ public class ChatController {
 					Map<String, Object> body = new HashMap<>();
 					body.put("model", chatModel);
 					body.put("prompt", p.latestUserText);
-					body.put("system", p.system); // <-- fixed
+					body.put("system", p.system);
 					body.put("stream", false);
+					body.put("options", opts); // <-- NEW
 
 					JsonNode node = http.post().uri("/api/generate").contentType(MediaType.APPLICATION_JSON).body(body)
 							.retrieve().body(JsonNode.class);
@@ -122,6 +155,7 @@ public class ChatController {
 	@Operation(summary = "Chat with streaming + retrieval (SSE)", description = "Streams partial tokens as 'delta' events; emits 'meta' first with retrieved hits.")
 	public SseEmitter chatStream(@RequestBody ChatRequest req,
 			@RequestParam(name = "topK", required = false) Integer topKParam,
+			@RequestParam(name = "think", defaultValue = "FAST") String thinkParam,
 			@RequestParam(name = "debug", defaultValue = "false") boolean debug) {
 		final SseEmitter emitter = new SseEmitter(0L);
 
@@ -134,15 +168,19 @@ public class ChatController {
 					return;
 				}
 
+				ThinkMode think = ThinkMode.parse(thinkParam);
+				Map<String, Object> opts = optionsFor(think);
+
 				// meta first
 				Map<String, Object> meta = new LinkedHashMap<>();
 				meta.put("model", chatModel);
 				meta.put("retrieved", p.retrieved);
 				if (debug)
 					meta.put("context", p.context);
+				meta.put("think", think.name());
 				sendEvent(emitter, "meta", mapper.writeValueAsString(meta));
 
-				// stream from Ollama
+				// stream via /api/chat (line-delimited JSON frames)
 				URL url = new URL(baseUrl + "/api/chat");
 				HttpURLConnection con = (HttpURLConnection) url.openConnection();
 				con.setRequestMethod("POST");
@@ -153,6 +191,9 @@ public class ChatController {
 				body.put("model", chatModel);
 				body.put("messages", p.messages);
 				body.put("stream", true);
+				body.put("options", opts); // <-- NEW
+				// keep model warm a bit to reduce first-token lag
+				body.put("keep_alive", "5m");
 
 				try (OutputStream os = con.getOutputStream()) {
 					os.write(mapper.writeValueAsBytes(body));
@@ -177,17 +218,14 @@ public class ChatController {
 						new InputStreamReader(con.getInputStream(), StandardCharsets.UTF_8))) {
 					String line;
 					while ((line = br.readLine()) != null) {
-						line = line.trim();
-						if (line.isEmpty())
+						if (line.isBlank())
 							continue;
-
 						JsonNode node = mapper.readTree(line);
 						String delta = null;
-						if (node.has("message") && node.get("message").has("content")) {
+						if (node.has("message") && node.get("message").has("content"))
 							delta = node.get("message").get("content").asText();
-						} else if (node.has("response")) {
+						else if (node.has("response"))
 							delta = node.get("response").asText();
-						}
 						if (delta != null && !delta.isEmpty())
 							sendEvent(emitter, "delta", delta);
 						if (node.has("done") && node.get("done").asBoolean(false))
@@ -208,6 +246,39 @@ public class ChatController {
 		}, "chat-stream-worker").start();
 
 		return emitter;
+	}
+
+	// ===== NEW: map think level to Ollama options =====
+	private static Map<String, Object> optionsFor(ThinkMode mode) {
+		Map<String, Object> m = new HashMap<>();
+		switch (mode) {
+		case FAST -> {
+			m.put("num_predict", 256);
+			m.put("temperature", 0.2);
+			m.put("top_p", 0.9);
+		}
+		case MEDIUM -> {
+			m.put("num_predict", 512);
+			m.put("temperature", 0.4);
+			m.put("top_p", 0.95);
+		}
+		case LONG -> {
+			m.put("num_predict", 1024);
+			m.put("temperature", 0.6);
+			m.put("top_p", 0.98);
+		}
+		case XLONG -> {
+			m.put("num_predict", 2048);
+			m.put("temperature", 0.7);
+			m.put("top_p", 0.98);
+		}
+		case MAX -> {
+			m.put("num_predict", 4096); // cap generously; model may still limit
+			m.put("temperature", 0.7);
+			m.put("top_p", 0.98);
+		}
+		}
+		return m;
 	}
 
 	// -------- shared prep --------
