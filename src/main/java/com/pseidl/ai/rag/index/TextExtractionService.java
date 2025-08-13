@@ -140,7 +140,7 @@ public class TextExtractionService {
         return t.trim();
     }
 
-    private static String extension(Path p) {
+    public String extension(Path p) {
         String name = p.getFileName().toString().toLowerCase(Locale.ROOT);
         int dot = name.lastIndexOf('.');
         return (dot >= 0) ? name.substring(dot + 1) : "";
