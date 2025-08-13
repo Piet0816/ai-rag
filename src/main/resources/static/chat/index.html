@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Library RAG Chat</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <!-- External assets (we'll create these next) -->
+  <link rel="stylesheet" href="/chat/app.css" />
+</head>
+<body>
+  <div class="app">
+    <!-- Sidebar: conversations -->
+    <aside class="sidebar">
+      <header class="sidebar__header">
+        <h1 class="logo">Library RAG</h1>
+        <button id="newChatBtn" class="btn btn--primary" title="Start a new chat">+ New chat</button>
+      </header>
+
+      <div class="sidebar__body">
+        <ul id="chatList" class="chat-list" aria-label="Conversations">
+          <!-- JS will render conversations here -->
+        </ul>
+      </div>
+
+      <footer class="sidebar__footer">
+        <a class="link" href="/swagger-ui.html" target="_blank" rel="noreferrer">Swagger API</a>
+        <button id="reloadIndexBtn" class="btn btn--ghost" title="Reload index from disk">Reload index</button>
+      </footer>
+    </aside>
+
+    <!-- Main: chat thread -->
+    <main class="main">
+      <header class="main__header">
+        <div class="model">
+          <span class="model__label">Model:</span>
+          <span id="modelName" class="model__value">loading…</span>
+        </div>
+
+        <div class="settings">
+          <label class="field">
+            <span class="field__label">Top-K</span>
+            <input id="topK" class="input" type="number" min="1" step="1" value="6" />
+          </label>
+          <label class="field field--switch">
+            <input id="debugToggle" type="checkbox" />
+            <span>Show context</span>
+          </label>
+          <button id="ingestAllBtn" class="btn btn--ghost" title="Ingest all default file types">Ingest all</button>
+        </div>
+      </header>
+
+      <section id="messages" class="messages" aria-live="polite">
+        <!-- JS will render message bubbles here -->
+        <div class="messages__placeholder">
+          <p>Ask something like: <em>“What does Alice like to eat?”</em></p>
+          <p class="note">Make sure you’ve ingested your library files first.</p>
+        </div>
+      </section>
+
+      <!-- Composer -->
+      <form id="composerForm" class="composer" autocomplete="off" novalidate>
+        <textarea
+          id="composerInput"
+          class="composer__input"
+          rows="1"
+          placeholder="Type a message…"
+          aria-label="Message"
+        ></textarea>
+        <button id="sendBtn" class="btn btn--primary" type="submit">Send</button>
+      </form>
+    </main>
+  </div>
+
+  <!-- Modal for retrieved snippets (optional, toggled by JS when debug=true) -->
+  <dialog id="contextModal" class="modal">
+    <article class="modal__card">
+      <header class="modal__header">
+        <h2>Retrieved context</h2>
+        <button id="closeContextBtn" class="btn btn--icon" aria-label="Close">✕</button>
+      </header>
+      <pre id="contextText" class="modal__body"></pre>
+    </article>
+  </dialog>
+
+  <noscript>
+    <p style="padding:1rem;">This page requires JavaScript to chat with the backend.</p>
+  </noscript>
+
+  <!-- External script (we'll add this next) -->
+  <script src="/chat/app.js" defer></script>
+</body>
+</html>
