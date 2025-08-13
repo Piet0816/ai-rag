@@ -14,7 +14,6 @@ const sendBtn = document.getElementById("sendBtn");
 
 const modelNameEl = document.getElementById("modelName");
 const topKInput = document.getElementById("topK");
-const debugToggle = document.getElementById("debugToggle");
 
 const contextModal = document.getElementById("contextModal");
 const contextText = document.getElementById("contextText");
@@ -33,6 +32,34 @@ const isWord = c => !!c && /[A-Za-z0-9]/.test(c); // keep simple; works well for
 function smartAppend(prev, delta) {
   if (!delta) return prev;
   return prev + delta;
+}
+
+let userCanceled = false;
+
+function ensureStopButton() {
+  let btn = document.getElementById("stopBtn");
+  if (btn) return btn;
+
+  btn = document.createElement("button");
+  btn.id = "stopBtn";
+  btn.type = "button";
+  btn.textContent = "Stop";
+  btn.title = "Stop streaming";
+  btn.className = "btn";
+  btn.style.marginLeft = "8px";
+  btn.style.display = "none"; // hidden until streaming
+  btn.onclick = () => {
+    userCanceled = true;
+    if (activeStream && activeStream.cancel) {
+      try { activeStream.cancel(); } catch {}
+    }
+    btn.disabled = true;
+    btn.textContent = "Stopping…";
+  };
+
+  // place it right next to the Send button
+  sendBtn.parentElement.insertBefore(btn, sendBtn.nextElementSibling);
+  return btn;
 }
 
 // --- local storage
@@ -310,33 +337,47 @@ async function sendMessage() {
   appendMessage("assistant", "", { retrieved: [], context: null });
   const assistantIndex = conv.messages.length - 1;
 
+  // --- NEW: show Stop button while streaming ---
+  userCanceled = false;
+  const stopBtn = ensureStopButton();
+  stopBtn.style.display = "inline-flex";
+  stopBtn.disabled = false;
+  stopBtn.textContent = "Stop";
+
   try {
     const topK = clamp(parseInt(topKInput.value, 10) || 6, 1, 50);
-    const debug = !!debugToggle.checked;
+    const debug = true;
     const payload = { messages: conv.messages.map(m => ({ role: m.role, content: m.content })) };
 
-    const stream = await postSSE("/api/chat/stream", payload, { topK, debug });
+    const stream = await postSSE("/api/chat/stream", payload, { topK, debug /* , think: 'FAST' etc. */ });
     activeStream = stream;
 
     for await (const ev of stream.events()) {
-      if (ev.event === "meta") {
-        try {
-          const meta = JSON.parse(ev.data);
-          if (meta.model) setModelName(meta.model);
-          conv.messages[assistantIndex].meta = {
-            retrieved: Array.isArray(meta.retrieved) ? meta.retrieved : [],
-            context: debug ? (meta.context || null) : null
-          };
-          saveState(); renderMessages();
-        } catch { /* ignore */ }
-      } else if (ev.event === "delta") {
-        // Use smartAppend to keep natural spacing between streamed tokens
+		if (ev.event === "meta") {
+		  const meta = JSON.parse(ev.data);
+
+		  const conv = getActiveConversation();
+		  const msg  = conv.messages[assistantIndex];   // the assistant bubble we just created
+		  msg.meta = msg.meta || {};                    // <-- ensure meta object
+
+		  // write where renderMessageBubble expects them:
+		  msg.meta.retrieved = Array.isArray(meta.retrieved) ? meta.retrieved : [];
+		  msg.meta.context   = (typeof meta.context === 'string' && meta.context.trim()) ? meta.context : null;
+
+		  // optional extras
+		  msg.model = meta.model || msg.model;
+		  msg.think = meta.think || msg.think;
+
+		  saveState();
+		  renderMessages();
+		  continue;
+		} else if (ev.event === "delta") {
         const prev = conv.messages[assistantIndex].content;
-        conv.messages[assistantIndex].content = smartAppend(prev, ev.data);
+        conv.messages[assistantIndex].content = prev + ev.data; // your spacing fix
         saveState(); renderMessages();
         messagesEl.scrollTop = messagesEl.scrollHeight;
       } else if (ev.event === "done") {
-        renameConversationIfEmptyTitle(conv, text);
+        // (unchanged)
       } else if (ev.event === "error") {
         conv.messages[assistantIndex].content = `Error: ${ev.data}`;
         saveState(); renderMessages();
@@ -344,12 +385,18 @@ async function sendMessage() {
     }
   } catch (err) {
     const conv2 = getActiveConversation();
-    conv2.messages[assistantIndex].content = `Error: ${err.message || err}`;
-    saveState(); renderMessages();
+    // --- NEW: don't show an error if the user pressed Stop ---
+    if (!userCanceled) {
+      conv2.messages[assistantIndex].content = `Error: ${err.message || err}`;
+      saveState(); renderMessages();
+    }
   } finally {
     sendBtn.textContent = prevLabel; sendBtn.disabled = false; composerInput.focus();
+    // --- NEW: hide Stop button when finished or canceled ---
+    if (stopBtn) { stopBtn.style.display = "none"; stopBtn.disabled = true; stopBtn.textContent = "Stop"; }
   }
 }
+
 
 async function reloadIndex() {
   const prev = reloadIndexBtn.textContent;

@@ -148,7 +148,7 @@ public class ChatController {
 				}
 			}
 
-			return ResponseEntity.ok(new ChatResponse(chatModel, reply, p.retrieved, debug ? p.context : null));
+			return ResponseEntity.ok(new ChatResponse(chatModel, reply, p.retrieved, p.context));
 		} catch (Exception e) {
 			return ResponseEntity.internalServerError().body(ChatResponse.error("Chat failed: " + e.getMessage()));
 		}
@@ -179,8 +179,7 @@ public class ChatController {
 				Map<String, Object> meta = new LinkedHashMap<>();
 				meta.put("model", chatModel);
 				meta.put("retrieved", p.retrieved);
-				if (debug)
-					meta.put("context", p.context);
+				meta.put("context", p.context);             
 				meta.put("think", think.name());
 				sendEvent(emitter, "meta", mapper.writeValueAsString(meta));
 
